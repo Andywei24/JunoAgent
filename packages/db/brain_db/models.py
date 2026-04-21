@@ -17,6 +17,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     String,
@@ -160,7 +161,7 @@ class Event(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     sequence: Mapped[int] = mapped_column(
-        BigInteger, autoincrement=True, unique=True, nullable=False
+        BigInteger, Identity(start=1), unique=True, nullable=False
     )
     task_id: Mapped[str | None] = mapped_column(
         String(64), ForeignKey("tasks.id", ondelete="CASCADE"), index=True

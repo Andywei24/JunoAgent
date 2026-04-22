@@ -6,7 +6,12 @@ tests can build isolated instances.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from brain_db.session import init_engine
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from brain_api.config import Settings, get_settings
 from brain_api.logging_setup import configure_logging, get_logger
@@ -14,7 +19,6 @@ from brain_api.middleware import RequestContextMiddleware
 from brain_api.routes.health import router as health_router
 from brain_api.routes.tasks import router as tasks_router
 from brain_api.services import build_services
-from brain_db.session import init_engine
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -38,6 +42,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(RequestContextMiddleware)
     app.include_router(health_router)
     app.include_router(tasks_router)
+
+    console_dir = Path(__file__).resolve().parents[3] / "apps" / "console"
+    if console_dir.exists():
+        app.mount("/console", StaticFiles(directory=console_dir, html=True), name="console")
+
+        @app.get("/", include_in_schema=False)
+        def _console_redirect() -> RedirectResponse:
+            return RedirectResponse(url="/console/")
 
     # Process-wide service container (LLM, prompts, orchestrator, runner).
     app.state.services = build_services(settings)

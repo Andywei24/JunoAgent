@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Juno Brain Console</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">JB</div>
+          <div>
+            <h1>Juno Brain</h1>
+            <p>Operator console</p>
+          </div>
+        </div>
+
+        <section class="panel create-panel" aria-labelledby="create-title">
+          <div class="panel-heading">
+            <h2 id="create-title">Create Task</h2>
+          </div>
+          <form id="task-form" class="task-form">
+            <label for="goal">Goal</label>
+            <textarea
+              id="goal"
+              name="goal"
+              rows="6"
+              maxlength="8000"
+              placeholder="Research three lightweight CRM tools and recommend one."
+              required
+            ></textarea>
+            <div class="form-row">
+              <label for="priority">Priority</label>
+              <input id="priority" name="priority" type="number" value="0" min="0" max="10" />
+            </div>
+            <button type="submit" class="primary-button">Run Task</button>
+          </form>
+        </section>
+
+        <section class="panel task-list-panel" aria-labelledby="tasks-title">
+          <div class="panel-heading">
+            <h2 id="tasks-title">Tasks</h2>
+            <button id="refresh-tasks" class="ghost-button" type="button">Refresh</button>
+          </div>
+          <div id="task-list" class="task-list" aria-live="polite"></div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Task Detail</p>
+            <h2 id="task-title">Select a task</h2>
+          </div>
+          <div class="topbar-actions">
+            <span id="stream-state" class="stream-state">Stream idle</span>
+            <button id="cancel-task" class="danger-button" type="button" hidden>Cancel</button>
+          </div>
+        </header>
+
+        <section id="empty-state" class="empty-state">
+          <div class="empty-visual" aria-hidden="true"></div>
+          <h2>No task selected</h2>
+          <p>Create a goal or choose an existing task to inspect the plan, events, and result.</p>
+        </section>
+
+        <section id="task-view" class="task-view" hidden>
+          <section class="summary-grid" aria-label="Task summary">
+            <div class="metric">
+              <span>Status</span>
+              <strong id="detail-status">-</strong>
+            </div>
+            <div class="metric">
+              <span>Risk</span>
+              <strong id="detail-risk">-</strong>
+            </div>
+            <div class="metric">
+              <span>Steps</span>
+              <strong id="detail-steps">0</strong>
+            </div>
+            <div class="metric">
+              <span>Events</span>
+              <strong id="detail-events">0</strong>
+            </div>
+          </section>
+
+          <section class="detail-layout">
+            <div class="main-column">
+              <section class="panel">
+                <div class="panel-heading">
+                  <h2>Plan</h2>
+                  <span id="plan-updated" class="muted"></span>
+                </div>
+                <div id="step-list" class="step-list"></div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-heading">
+                  <h2>Final Output</h2>
+                </div>
+                <pre id="final-output" class="json-box"></pre>
+              </section>
+            </div>
+
+            <div class="side-column">
+              <section class="panel">
+                <div class="panel-heading">
+                  <h2>Parsed Goal</h2>
+                </div>
+                <pre id="parsed-goal" class="json-box compact"></pre>
+              </section>
+
+              <section class="panel events-panel">
+                <div class="panel-heading">
+                  <h2>Live Events</h2>
+                  <span id="last-event" class="muted"></span>
+                </div>
+                <div id="event-list" class="event-list"></div>
+              </section>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script src="./app.js" defer></script>
+  </body>
+</html>

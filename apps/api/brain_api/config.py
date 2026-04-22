@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     dev_user_id: str = Field(default="user_dev", alias="DEV_USER_ID")
     dev_user_email: str = Field(default="dev@local", alias="DEV_USER_EMAIL")
 
+    # LLM provider selection
+    llm_provider: str = Field(default="mock", alias="LLM_PROVIDER")  # "mock" or "anthropic"
+    anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
+
 
 @lru_cache
 def get_settings() -> Settings:

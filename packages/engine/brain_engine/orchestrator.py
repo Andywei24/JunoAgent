@@ -41,6 +41,7 @@ from brain_prompts.registry import PromptRegistry
 from brain_engine.goal_parser import GoalParser
 from brain_engine.planner import Planner
 from brain_engine.tool_router import ToolExecutionContext, ToolRouter
+from brain_engine.tool_spec import ToolValidationError, validate_payload
 
 
 log = logging.getLogger(__name__)
@@ -169,7 +170,8 @@ class Orchestrator:
             self._run_single_step(task_id, step_id)
 
     def _run_single_step(self, task_id: str, step_id: str) -> None:
-        # Phase A: pending -> ready -> running, record selected tool, emit events.
+        # Phase A: resolve the tool, validate input, transition to RUNNING,
+        # and emit tool.selected + tool.started + step.started.
         with self._session() as db:
             steps_repo = StepRepository(db)
             tasks_repo = TaskRepository(db)
@@ -177,19 +179,66 @@ class Orchestrator:
             step = _require_step(steps_repo, step_id)
             task = _require_task(tasks_repo, task_id)
             executor = self._deps.tool_router.resolve(step.required_capability)
-            # `selected_tool_id` is a FK to the `tools` table, which only holds
-            # registered external tools. Stage 2 uses an in-process executor,
-            # so we record its logical id on the `tool.selected` event payload
-            # instead and leave the FK column null.
+            spec = executor.spec
+
+            step.selected_tool_id = spec.id
             steps_repo.transition(step, StepStatus.READY)
-            steps_repo.transition(step, StepStatus.RUNNING)
+
             events.append(
                 event_type=EventType.TOOL_SELECTED,
                 task_id=task_id,
                 step_id=step_id,
                 payload={
                     "capability": step.required_capability,
-                    "tool_id": executor.tool_id,
+                    "resolved_capability": spec.capability,
+                    "tool_id": spec.id,
+                    "tool_name": spec.name,
+                    "tool_version": spec.version,
+                    "risk_level": spec.risk_level.value,
+                },
+                actor_type=ActorType.SYSTEM,
+            )
+
+            input_payload = step.input_payload or {}
+            try:
+                validate_payload(
+                    input_payload,
+                    spec.input_schema,
+                    tool_id=spec.id,
+                    direction="input",
+                )
+            except ToolValidationError as exc:
+                step.error = str(exc)
+                steps_repo.transition(step, StepStatus.FAILED)
+                events.append(
+                    event_type=EventType.TOOL_FAILED,
+                    task_id=task_id,
+                    step_id=step_id,
+                    payload={
+                        "tool_id": spec.id,
+                        "stage": "input_validation",
+                        "errors": exc.errors,
+                    },
+                    actor_type=ActorType.SYSTEM,
+                )
+                events.append(
+                    event_type=EventType.STEP_FAILED,
+                    task_id=task_id,
+                    step_id=step_id,
+                    payload={"error": str(exc)},
+                    actor_type=ActorType.SYSTEM,
+                )
+                db.commit()
+                raise RuntimeError(f"step {step_id} failed: {exc}") from exc
+
+            steps_repo.transition(step, StepStatus.RUNNING)
+            events.append(
+                event_type=EventType.TOOL_STARTED,
+                task_id=task_id,
+                step_id=step_id,
+                payload={
+                    "tool_id": spec.id,
+                    "input_keys": sorted(input_payload.keys()),
                 },
                 actor_type=ActorType.SYSTEM,
             )
@@ -205,27 +254,48 @@ class Orchestrator:
                 step_id=step_id,
                 goal=task.goal,
                 step_name=step.name,
-                input_payload=step.input_payload or {},
+                input_payload=input_payload,
             )
             db.commit()
 
         # Phase B: execute outside the DB session — the call can be slow
         # and holding a transaction here would block SSE polling.
+        output: dict[str, Any] | None = None
+        error: str | None = None
+        validation_errors: list[str] | None = None
         try:
             output = executor.execute(ctx)
-            error: str | None = None
+            validate_payload(
+                output,
+                spec.output_schema,
+                tool_id=spec.id,
+                direction="output",
+            )
+        except ToolValidationError as exc:
+            log.warning("step %s output failed validation: %s", step_id, exc)
+            validation_errors = exc.errors
+            error = str(exc)
         except Exception as exc:  # noqa: BLE001 - per-step isolation
             log.exception("step %s failed", step_id)
-            output = None
             error = f"{type(exc).__name__}: {exc}"
 
-        # Phase C: persist result and emit terminal step event.
+        # Phase C: persist result and emit terminal tool + step events.
         with self._session() as db:
             steps_repo = StepRepository(db)
             events = EventRepository(db)
             step = _require_step(steps_repo, step_id)
             if error is None:
                 step.output_payload = output
+                events.append(
+                    event_type=EventType.TOOL_COMPLETED,
+                    task_id=task_id,
+                    step_id=step_id,
+                    payload={
+                        "tool_id": spec.id,
+                        "output_keys": sorted((output or {}).keys()),
+                    },
+                    actor_type=ActorType.SYSTEM,
+                )
                 steps_repo.transition(step, StepStatus.COMPLETED)
                 events.append(
                     event_type=EventType.STEP_COMPLETED,
@@ -237,6 +307,22 @@ class Orchestrator:
                 db.commit()
             else:
                 step.error = error
+                tool_failure_payload: dict[str, Any] = {
+                    "tool_id": spec.id,
+                    "stage": (
+                        "output_validation" if validation_errors else "execution"
+                    ),
+                    "error": error,
+                }
+                if validation_errors is not None:
+                    tool_failure_payload["errors"] = validation_errors
+                events.append(
+                    event_type=EventType.TOOL_FAILED,
+                    task_id=task_id,
+                    step_id=step_id,
+                    payload=tool_failure_payload,
+                    actor_type=ActorType.SYSTEM,
+                )
                 steps_repo.transition(step, StepStatus.FAILED)
                 events.append(
                     event_type=EventType.STEP_FAILED,
@@ -246,7 +332,6 @@ class Orchestrator:
                     actor_type=ActorType.SYSTEM,
                 )
                 db.commit()
-                # Abort the rest of the task on first step failure.
                 raise RuntimeError(f"step {step_id} failed: {error}")
 
     def _finalize(self, task_id: str) -> None:

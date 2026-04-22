@@ -14,10 +14,16 @@ from sqlalchemy.orm import sessionmaker
 
 from brain_api.config import Settings
 from brain_db import session as db_session
-from brain_engine.executors import LLMReasoningExecutor
+from brain_db.repositories import ToolRepository
+from brain_engine.executors import (
+    CompareItemsExecutor,
+    LLMReasoningExecutor,
+    SummarizeTextExecutor,
+)
 from brain_engine.orchestrator import Orchestrator, OrchestratorDeps
 from brain_engine.runner import TaskRunner
 from brain_engine.tool_router import ToolRouter
+from brain_engine.tool_spec import ToolSpec
 from brain_llm.client import LLMClient
 from brain_llm.providers.mock import build_default_mock
 from brain_llm.service import LLMService
@@ -47,6 +53,10 @@ def build_services(settings: Settings) -> Services:
     prompts = default_registry()
     tool_router = ToolRouter()
     tool_router.register(LLMReasoningExecutor(llm, prompts))
+    tool_router.register(SummarizeTextExecutor(llm, prompts))
+    tool_router.register(CompareItemsExecutor(llm, prompts))
+
+    _sync_tool_registry(factory, tool_router.list_specs())
 
     orchestrator = Orchestrator(
         OrchestratorDeps(
@@ -67,6 +77,32 @@ def build_services(settings: Settings) -> Services:
         orchestrator=orchestrator,
         runner=runner,
     )
+
+
+def _sync_tool_registry(
+    factory: sessionmaker[OrmSession], specs: list[ToolSpec]
+) -> None:
+    """Upsert every registered :class:`ToolSpec` into the ``tools`` table.
+
+    Keeps code as the source of truth: each deploy writes the current set of
+    specs to the DB so steps can FK their ``selected_tool_id`` to a real row.
+    """
+    with factory() as db:
+        repo = ToolRepository(db)
+        for spec in specs:
+            repo.upsert(
+                id=spec.id,
+                name=spec.name,
+                description=spec.description,
+                capability_type=spec.capability_type.value,
+                backend_type=spec.backend_type.value,
+                input_schema=spec.input_schema,
+                output_schema=spec.output_schema,
+                risk_level=spec.risk_level.value,
+                timeout_seconds=spec.timeout_seconds,
+                version=spec.version,
+            )
+        db.commit()
 
 
 def _build_providers(settings: Settings) -> tuple[LLMClient, list[LLMClient]]:

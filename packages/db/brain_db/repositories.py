@@ -157,6 +157,73 @@ class StepRepository:
 
 
 # ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+
+class ToolRepository:
+    """CRUD for the tool registry.
+
+    The registry is the durable projection of in-process :class:`ToolSpec`
+    objects: specs are registered in code on boot and synced here so the
+    rest of the platform (steps, audit logs, eventually approvals) can
+    reference tools by stable id.
+    """
+
+    def __init__(self, db: OrmSession) -> None:
+        self.db = db
+
+    def get(self, tool_id: str) -> models.Tool | None:
+        return self.db.get(models.Tool, tool_id)
+
+    def list_enabled(self) -> list[models.Tool]:
+        stmt = (
+            select(models.Tool)
+            .where(models.Tool.enabled.is_(True))
+            .order_by(models.Tool.name)
+        )
+        return list(self.db.scalars(stmt))
+
+    def upsert(
+        self,
+        *,
+        id: str,
+        name: str,
+        description: str,
+        capability_type: str,
+        backend_type: str,
+        input_schema: dict[str, Any] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        risk_level: str = "low",
+        required_permissions: list[str] | None = None,
+        timeout_seconds: int = 30,
+        retry_policy: dict[str, Any] | None = None,
+        cost_model: dict[str, Any] | None = None,
+        version: str = "1",
+        enabled: bool = True,
+    ) -> models.Tool:
+        tool = self.get(id)
+        if tool is None:
+            tool = models.Tool(id=id)
+            self.db.add(tool)
+        tool.name = name
+        tool.description = description
+        tool.capability_type = capability_type
+        tool.backend_type = backend_type
+        tool.input_schema = input_schema or {}
+        tool.output_schema = output_schema or {}
+        tool.risk_level = risk_level
+        tool.required_permissions = required_permissions or []
+        tool.timeout_seconds = timeout_seconds
+        tool.retry_policy = retry_policy or {}
+        tool.cost_model = cost_model or {}
+        tool.version = version
+        tool.enabled = enabled
+        self.db.flush()
+        return tool
+
+
+# ---------------------------------------------------------------------------
 # Events (append-only)
 # ---------------------------------------------------------------------------
 

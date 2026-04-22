@@ -1,17 +1,18 @@
-"""Tool router — maps capability tags to executors.
+"""Tool router — resolves capability tags to concrete executors.
 
-Stage 2 ships a single built-in executor: ``llm_reasoning``. Later stages
-add external tools (web search, code exec) by registering their own
-:class:`ToolExecutor` implementations.
-
-The router stays deliberately thin — capability resolution only. Credential
-checks, risk gating, and approval flows live in the workflow engine.
+The router is the boundary between plan steps (which carry a
+``required_capability`` string) and the code that actually does the work.
+Each executor carries a :class:`ToolSpec` so the router can surface its
+declared id, risk level, and schemas without the executor leaking
+implementation details.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+from brain_engine.tool_spec import ToolSpec
 
 
 @dataclass(slots=True)
@@ -24,8 +25,7 @@ class ToolExecutionContext:
 
 
 class ToolExecutor(Protocol):
-    capability: str
-    tool_id: str  # logical identifier recorded on the step
+    spec: ToolSpec
 
     def execute(self, ctx: ToolExecutionContext) -> dict[str, Any]:
         ...
@@ -36,17 +36,18 @@ class ToolRouter:
         self._by_capability: dict[str, ToolExecutor] = {}
 
     def register(self, executor: ToolExecutor) -> None:
-        cap = executor.capability
+        cap = executor.spec.capability
         if cap in self._by_capability:
             raise ValueError(f"capability already registered: {cap}")
         self._by_capability[cap] = executor
 
     def resolve(self, capability: str | None) -> ToolExecutor:
-        """Pick an executor for the step. Falls back to ``llm_reasoning``.
+        """Return an executor for ``capability``, falling back to ``llm_reasoning``.
 
-        The fallback is deliberate: stage-2 plans are LLM-authored and the
-        model sometimes invents capability tags. Rather than failing the step,
-        we run it through general reasoning. Later stages will tighten this.
+        The fallback is deliberate: plans are LLM-authored and the model
+        occasionally invents capability tags. Routing unknowns to general
+        reasoning keeps the run alive; policy gates in later stages will
+        tighten this when stakes are high.
         """
         if capability and capability in self._by_capability:
             return self._by_capability[capability]
@@ -58,3 +59,6 @@ class ToolRouter:
 
     def capabilities(self) -> list[str]:
         return sorted(self._by_capability.keys())
+
+    def list_specs(self) -> list[ToolSpec]:
+        return [e.spec for e in self._by_capability.values()]

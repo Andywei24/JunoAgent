@@ -62,23 +62,32 @@ def planner_v1(request: LLMRequest) -> dict[str, Any]:
                 "input_payload": {"instruction": "decompose_goal"},
             },
             {
-                "name": "Draft the answer",
-                "description": "Synthesize a concise answer addressing each sub-problem.",
-                "required_capability": "llm_reasoning",
+                "name": "Compare the main options",
+                "description": (
+                    "Identify 2-3 concrete options implied by the goal and compare "
+                    "them across clarity and tradeoffs."
+                ),
+                "required_capability": "compare_items",
                 "risk_level": "low",
                 "approval_required": False,
-                "input_payload": {"instruction": "draft_answer"},
+                "input_payload": {
+                    "items": ["option_a", "option_b"],
+                    "criteria": ["clarity", "tradeoffs"],
+                },
             },
             {
-                "name": "Review and finalize",
-                "description": "Review the draft for clarity and correctness, finalize.",
-                "required_capability": "llm_reasoning",
+                "name": "Summarize the draft answer",
+                "description": "Produce a one-paragraph summary with 3 highlights.",
+                "required_capability": "summarize_text",
                 "risk_level": "low",
                 "approval_required": False,
-                "input_payload": {"instruction": "finalize"},
+                "input_payload": {
+                    "text": f"Draft answer addressing the goal: {short}",
+                    "focus": "user-facing takeaways",
+                },
             },
         ],
-        "completion_criteria": "A single finalized answer is produced.",
+        "completion_criteria": "A finalized answer with comparison + summary is produced.",
     }
 
 
@@ -95,8 +104,46 @@ def llm_reasoning_v1(request: LLMRequest) -> dict[str, Any]:
     }
 
 
+def summarize_text_v1(request: LLMRequest) -> dict[str, Any]:
+    text = _first_var(request, "text") or ""
+    focus = _first_var(request, "focus") or "general"
+    snippet = text[:120]
+    return {
+        "summary": (
+            f"[mock] Summary focused on {focus}. Source snippet: {snippet}"
+        ),
+        "highlights": [
+            "[mock] highlight #1",
+            "[mock] highlight #2",
+            "[mock] highlight #3",
+        ],
+    }
+
+
+def compare_items_v1(request: LLMRequest) -> dict[str, Any]:
+    raw_items = _first_var(request, "items") or "[]"
+    try:
+        import json as _json
+
+        items = _json.loads(raw_items) if raw_items.startswith("[") else [raw_items]
+    except Exception:
+        items = [raw_items]
+    if not items:
+        items = ["option_a", "option_b"]
+    return {
+        "summary": f"[mock] Compared {len(items)} items.",
+        "comparisons": [
+            {"item": str(item), "notes": f"[mock] notes for {item}"}
+            for item in items
+        ],
+        "recommendation": f"[mock] Pick {items[0]}.",
+    }
+
+
 DEFAULT_RESPONDERS = {
     "goal_parser/v1": goal_parser_v1,
     "planner/v1": planner_v1,
     "llm_reasoning/v1": llm_reasoning_v1,
+    "summarize_text/v1": summarize_text_v1,
+    "compare_items/v1": compare_items_v1,
 }

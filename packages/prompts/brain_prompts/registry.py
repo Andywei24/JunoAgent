@@ -38,12 +38,14 @@ class PromptRegistry:
 
 
 def default_registry() -> PromptRegistry:
+    from brain_prompts.templates.compare_items_v1 import TEMPLATE as _compare
     from brain_prompts.templates.goal_parser_v1 import TEMPLATE as _goal
     from brain_prompts.templates.llm_reasoning_v1 import TEMPLATE as _reason
     from brain_prompts.templates.planner_v1 import TEMPLATE as _planner
+    from brain_prompts.templates.summarize_text_v1 import TEMPLATE as _summarize
 
     reg = PromptRegistry()
-    for tpl in (_goal, _planner, _reason):
+    for tpl in (_goal, _planner, _reason, _summarize, _compare):
         reg.register(tpl)
     return reg
 

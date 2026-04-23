@@ -15,12 +15,15 @@ from sqlalchemy.orm import sessionmaker
 from brain_api.config import Settings
 from brain_db import session as db_session
 from brain_db.repositories import ToolRepository
+from brain_engine.approvals import ApprovalManager
+from brain_engine.budget import BudgetController
 from brain_engine.executors import (
     CompareItemsExecutor,
     LLMReasoningExecutor,
     SummarizeTextExecutor,
 )
 from brain_engine.orchestrator import Orchestrator, OrchestratorDeps
+from brain_engine.policy import PolicyEngine
 from brain_engine.runner import TaskRunner
 from brain_engine.tool_router import ToolRouter
 from brain_engine.tool_spec import ToolSpec
@@ -37,6 +40,9 @@ class Services:
     llm: LLMService
     prompts: PromptRegistry
     tool_router: ToolRouter
+    policy: PolicyEngine
+    budget: BudgetController
+    approvals: ApprovalManager
     orchestrator: Orchestrator
     runner: TaskRunner
 
@@ -58,12 +64,19 @@ def build_services(settings: Settings) -> Services:
 
     _sync_tool_registry(factory, tool_router.list_specs())
 
+    policy = PolicyEngine()
+    budget = BudgetController()
+    approvals = ApprovalManager()
+
     orchestrator = Orchestrator(
         OrchestratorDeps(
             session_factory=factory,
             llm=llm,
             prompts=prompts,
             tool_router=tool_router,
+            policy=policy,
+            budget=budget,
+            approvals=approvals,
         )
     )
     runner = TaskRunner(orchestrator)
@@ -74,6 +87,9 @@ def build_services(settings: Settings) -> Services:
         llm=llm,
         prompts=prompts,
         tool_router=tool_router,
+        policy=policy,
+        budget=budget,
+        approvals=approvals,
         orchestrator=orchestrator,
         runner=runner,
     )

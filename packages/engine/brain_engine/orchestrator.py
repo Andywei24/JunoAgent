@@ -10,7 +10,18 @@ Flow::
     created -> parsing  (goal parsing)
             -> planning (plan generation + step insertion)
             -> running  (step-by-step execution)
-            -> completed | failed
+            -> completed | failed | waiting_for_approval (pause) | cancelled
+
+Stage 5 introduces three gates in front of each step:
+
+  * :class:`PolicyEngine` — may block the step outright or require human
+    approval before execution. On approval-required the orchestrator pauses
+    the task (transitions to ``waiting_for_approval``) and returns; the
+    approval API later re-submits the task and ``run_task`` resumes from
+    the step whose status is now ``ready``.
+  * :class:`BudgetController` — enforces per-task LLM/step budgets. Exceeding
+    a budget fails the task with a ``budget.exceeded`` event.
+  * Input/output JSON-schema validation (inherited from Stage 4).
 
 Any unexpected exception is funneled into a ``failed`` transition with the
 exception class + message recorded on the task. That makes test runs
@@ -38,13 +49,24 @@ from brain_llm.service import LLMService
 from brain_llm.types import LLMRequest, LLMResponse
 from brain_prompts.registry import PromptRegistry
 
+from brain_engine.approvals import ApprovalManager
+from brain_engine.budget import BudgetController
 from brain_engine.goal_parser import GoalParser
 from brain_engine.planner import Planner
+from brain_engine.policy import PolicyAction, PolicyEngine
 from brain_engine.tool_router import ToolExecutionContext, ToolRouter
 from brain_engine.tool_spec import ToolValidationError, validate_payload
 
 
 log = logging.getLogger(__name__)
+
+
+# Step outcomes from ``_run_single_step``. 'paused' and 'blocked' stop the
+# step loop; 'completed' and 'skipped' allow the loop to continue.
+_OUTCOME_COMPLETED = "completed"
+_OUTCOME_PAUSED = "paused"
+_OUTCOME_BLOCKED = "blocked"
+_OUTCOME_SKIPPED = "skipped"
 
 
 @dataclass(slots=True)
@@ -53,6 +75,9 @@ class OrchestratorDeps:
     llm: LLMService
     prompts: PromptRegistry
     tool_router: ToolRouter
+    policy: PolicyEngine
+    budget: BudgetController
+    approvals: ApprovalManager
 
 
 class Orchestrator:
@@ -60,7 +85,8 @@ class Orchestrator:
         self._deps = deps
         self._goal_parser = GoalParser(deps.llm, deps.prompts)
         self._planner = Planner(deps.llm, deps.prompts)
-        # Wrap the LLM service so every call emits an ``llm.called`` event.
+        # Wrap the LLM service so every call emits an ``llm.called`` event
+        # and increments the per-task budget counter.
         deps.llm._on_call = self._on_llm_call  # type: ignore[attr-defined]
         self._active_task_id: str | None = None
 
@@ -71,9 +97,40 @@ class Orchestrator:
     def run_task(self, task_id: str) -> None:
         self._active_task_id = task_id
         try:
-            parsed_goal = self._run_parsing(task_id)
-            plan = self._run_planning(task_id, parsed_goal)
-            self._run_steps(task_id, parsed_goal, plan)
+            with self._session() as db:
+                task = TaskRepository(db).get(task_id)
+                if task is None:
+                    return
+                status = TaskStatus(task.status)
+
+            if status == TaskStatus.CREATED:
+                parsed_goal = self._run_parsing(task_id)
+                self._run_planning(task_id, parsed_goal)
+                self._transition_task_to_running(task_id)
+            elif status == TaskStatus.WAITING_FOR_APPROVAL:
+                # Approval API has already flipped the step back to ready and
+                # the task to running — continue the step loop.
+                self._transition_task_to_running(task_id)
+            elif status == TaskStatus.RUNNING:
+                # Re-entered mid-run (e.g., after process restart). Keep going.
+                pass
+            elif status in {
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+            }:
+                return
+            else:
+                log.warning(
+                    "run_task called on task %s with unexpected status %s",
+                    task_id,
+                    status.value,
+                )
+                return
+
+            paused = self._run_steps(task_id)
+            if paused:
+                return
             self._finalize(task_id)
         except Exception as exc:  # noqa: BLE001 - top-level guard on purpose
             log.exception("orchestrator failed for task %s", task_id)
@@ -150,54 +207,154 @@ class Orchestrator:
 
         return plan
 
-    def _run_steps(
-        self,
-        task_id: str,
-        parsed_goal: dict[str, Any],
-        plan: dict[str, Any],
-    ) -> None:
+    def _transition_task_to_running(self, task_id: str) -> None:
         with self._session() as db:
             tasks = TaskRepository(db)
             task = _require_task(tasks, task_id)
+            if TaskStatus(task.status) == TaskStatus.RUNNING:
+                return
             tasks.transition(task, TaskStatus.RUNNING)
             db.commit()
 
+    def _run_steps(self, task_id: str) -> bool:
+        """Iterate steps in order.
+
+        Returns True if processing paused (e.g., waiting for approval) so the
+        caller skips finalization and can be re-invoked later.
+        """
         with self._session() as db:
             steps = StepRepository(db).list_for_task(task_id)
             step_ids = [s.id for s in steps]
 
         for step_id in step_ids:
-            self._run_single_step(task_id, step_id)
+            outcome = self._run_single_step(task_id, step_id)
+            if outcome == _OUTCOME_PAUSED:
+                return True
+            if outcome == _OUTCOME_BLOCKED:
+                # Block / budget failures already emitted their events and
+                # transitioned the step; raising lets the top-level catch mark
+                # the task FAILED with a meaningful reason.
+                raise RuntimeError(f"step {step_id} blocked by policy or budget")
+        return False
 
-    def _run_single_step(self, task_id: str, step_id: str) -> None:
-        # Phase A: resolve the tool, validate input, transition to RUNNING,
-        # and emit tool.selected + tool.started + step.started.
+    def _run_single_step(self, task_id: str, step_id: str) -> str:
+        # Phase A — pre-execution: resolve executor, run policy + budget gates,
+        # validate input, transition into RUNNING. Emits tool.selected on the
+        # first visit; on resume (step.status==READY) we skip re-emitting.
         with self._session() as db:
             steps_repo = StepRepository(db)
             tasks_repo = TaskRepository(db)
             events = EventRepository(db)
             step = _require_step(steps_repo, step_id)
             task = _require_task(tasks_repo, task_id)
+
+            status = StepStatus(step.status)
+            if status in {
+                StepStatus.COMPLETED,
+                StepStatus.SKIPPED,
+                StepStatus.CANCELLED,
+                StepStatus.FAILED,
+            }:
+                return _OUTCOME_SKIPPED
+            if status == StepStatus.WAITING_FOR_APPROVAL:
+                # Someone else paused this step (e.g., re-entry from a crash
+                # before approval landed) — leave it alone.
+                return _OUTCOME_PAUSED
+
             executor = self._deps.tool_router.resolve(step.required_capability)
             spec = executor.spec
 
-            step.selected_tool_id = spec.id
-            steps_repo.transition(step, StepStatus.READY)
+            first_visit = status == StepStatus.PENDING
+            if first_visit:
+                step.selected_tool_id = spec.id
+                events.append(
+                    event_type=EventType.TOOL_SELECTED,
+                    task_id=task_id,
+                    step_id=step_id,
+                    payload={
+                        "capability": step.required_capability,
+                        "resolved_capability": spec.capability,
+                        "tool_id": spec.id,
+                        "tool_name": spec.name,
+                        "tool_version": spec.version,
+                        "risk_level": spec.risk_level.value,
+                    },
+                    actor_type=ActorType.SYSTEM,
+                )
 
-            events.append(
-                event_type=EventType.TOOL_SELECTED,
-                task_id=task_id,
-                step_id=step_id,
-                payload={
-                    "capability": step.required_capability,
-                    "resolved_capability": spec.capability,
-                    "tool_id": spec.id,
-                    "tool_name": spec.name,
-                    "tool_version": spec.version,
-                    "risk_level": spec.risk_level.value,
-                },
-                actor_type=ActorType.SYSTEM,
-            )
+                decision = self._deps.policy.evaluate(step=step, tool_spec=spec)
+                if decision.action == PolicyAction.BLOCK:
+                    events.append(
+                        event_type=EventType.POLICY_BLOCKED,
+                        task_id=task_id,
+                        step_id=step_id,
+                        payload={
+                            "tool_id": spec.id,
+                            "capability": spec.capability,
+                            "effective_risk": decision.effective_risk,
+                            "reason": decision.reason,
+                        },
+                        actor_type=ActorType.SYSTEM,
+                    )
+                    step.error = f"policy: {decision.reason}"
+                    steps_repo.transition(step, StepStatus.FAILED)
+                    events.append(
+                        event_type=EventType.STEP_FAILED,
+                        task_id=task_id,
+                        step_id=step_id,
+                        payload={"error": step.error},
+                        actor_type=ActorType.SYSTEM,
+                    )
+                    db.commit()
+                    return _OUTCOME_BLOCKED
+
+                if decision.action == PolicyAction.REQUIRE_APPROVAL:
+                    self._deps.approvals.request(
+                        db,
+                        task=task,
+                        step=step,
+                        requested_action=(
+                            f"run tool {spec.name} for step '{step.name}'"
+                        ),
+                        risk_level=decision.effective_risk,
+                        reason=decision.reason,
+                        data_involved={
+                            "capability": spec.capability,
+                            "tool_id": spec.id,
+                            "input_keys": sorted(
+                                (step.input_payload or {}).keys()
+                            ),
+                        },
+                    )
+                    db.commit()
+                    return _OUTCOME_PAUSED
+
+            # Budget gate — runs on both first visit and resume so late-edited
+            # budget limits still take effect.
+            budget_decision = self._deps.budget.check(task)
+            if not budget_decision.ok:
+                events.append(
+                    event_type=EventType.BUDGET_EXCEEDED,
+                    task_id=task_id,
+                    step_id=step_id,
+                    payload={
+                        "reason": budget_decision.reason,
+                        "limit": budget_decision.limit or {},
+                        "used": budget_decision.used or {},
+                    },
+                    actor_type=ActorType.SYSTEM,
+                )
+                step.error = f"budget: {budget_decision.reason}"
+                steps_repo.transition(step, StepStatus.FAILED)
+                events.append(
+                    event_type=EventType.STEP_FAILED,
+                    task_id=task_id,
+                    step_id=step_id,
+                    payload={"error": step.error},
+                    actor_type=ActorType.SYSTEM,
+                )
+                db.commit()
+                return _OUTCOME_BLOCKED
 
             input_payload = step.input_payload or {}
             try:
@@ -209,7 +366,14 @@ class Orchestrator:
                 )
             except ToolValidationError as exc:
                 step.error = str(exc)
-                steps_repo.transition(step, StepStatus.FAILED)
+                # Make sure the step is in a state we can fail from.
+                if StepStatus(step.status) in {
+                    StepStatus.PENDING,
+                    StepStatus.READY,
+                }:
+                    steps_repo.transition(step, StepStatus.FAILED)
+                else:
+                    step.status = StepStatus.FAILED.value
                 events.append(
                     event_type=EventType.TOOL_FAILED,
                     task_id=task_id,
@@ -231,7 +395,12 @@ class Orchestrator:
                 db.commit()
                 raise RuntimeError(f"step {step_id} failed: {exc}") from exc
 
+            # PENDING→READY is only valid on the first visit; on resume the
+            # step is already READY (approval manager put it there).
+            if StepStatus(step.status) == StepStatus.PENDING:
+                steps_repo.transition(step, StepStatus.READY)
             steps_repo.transition(step, StepStatus.RUNNING)
+
             events.append(
                 event_type=EventType.TOOL_STARTED,
                 task_id=task_id,
@@ -258,8 +427,7 @@ class Orchestrator:
             )
             db.commit()
 
-        # Phase B: execute outside the DB session — the call can be slow
-        # and holding a transaction here would block SSE polling.
+        # Phase B — execute outside the DB session.
         output: dict[str, Any] | None = None
         error: str | None = None
         validation_errors: list[str] | None = None
@@ -279,11 +447,18 @@ class Orchestrator:
             log.exception("step %s failed", step_id)
             error = f"{type(exc).__name__}: {exc}"
 
-        # Phase C: persist result and emit terminal tool + step events.
+        # Phase C — persist result, update budget, emit terminal events.
         with self._session() as db:
             steps_repo = StepRepository(db)
+            tasks_repo = TaskRepository(db)
             events = EventRepository(db)
             step = _require_step(steps_repo, step_id)
+            task = _require_task(tasks_repo, task_id)
+
+            # Count this as a consumed step regardless of outcome — failed
+            # attempts still burn budget.
+            self._deps.budget.record_step(task)
+
             if error is None:
                 step.output_payload = output
                 events.append(
@@ -305,34 +480,35 @@ class Orchestrator:
                     actor_type=ActorType.SYSTEM,
                 )
                 db.commit()
-            else:
-                step.error = error
-                tool_failure_payload: dict[str, Any] = {
-                    "tool_id": spec.id,
-                    "stage": (
-                        "output_validation" if validation_errors else "execution"
-                    ),
-                    "error": error,
-                }
-                if validation_errors is not None:
-                    tool_failure_payload["errors"] = validation_errors
-                events.append(
-                    event_type=EventType.TOOL_FAILED,
-                    task_id=task_id,
-                    step_id=step_id,
-                    payload=tool_failure_payload,
-                    actor_type=ActorType.SYSTEM,
-                )
-                steps_repo.transition(step, StepStatus.FAILED)
-                events.append(
-                    event_type=EventType.STEP_FAILED,
-                    task_id=task_id,
-                    step_id=step_id,
-                    payload={"error": error},
-                    actor_type=ActorType.SYSTEM,
-                )
-                db.commit()
-                raise RuntimeError(f"step {step_id} failed: {error}")
+                return _OUTCOME_COMPLETED
+
+            step.error = error
+            tool_failure_payload: dict[str, Any] = {
+                "tool_id": spec.id,
+                "stage": (
+                    "output_validation" if validation_errors else "execution"
+                ),
+                "error": error,
+            }
+            if validation_errors is not None:
+                tool_failure_payload["errors"] = validation_errors
+            events.append(
+                event_type=EventType.TOOL_FAILED,
+                task_id=task_id,
+                step_id=step_id,
+                payload=tool_failure_payload,
+                actor_type=ActorType.SYSTEM,
+            )
+            steps_repo.transition(step, StepStatus.FAILED)
+            events.append(
+                event_type=EventType.STEP_FAILED,
+                task_id=task_id,
+                step_id=step_id,
+                payload={"error": error},
+                actor_type=ActorType.SYSTEM,
+            )
+            db.commit()
+            raise RuntimeError(f"step {step_id} failed: {error}")
 
     def _finalize(self, task_id: str) -> None:
         with self._session() as db:
@@ -387,7 +563,14 @@ class Orchestrator:
             return
         try:
             with self._session() as db:
-                EventRepository(db).append(
+                tasks = TaskRepository(db)
+                events = EventRepository(db)
+                task = tasks.get(task_id)
+                if task is not None:
+                    self._deps.budget.record_llm(
+                        task, cost_usd=response.usage.cost_usd
+                    )
+                events.append(
                     event_type=EventType.LLM_CALLED,
                     task_id=task_id,
                     step_id=step_id,

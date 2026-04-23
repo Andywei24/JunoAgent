@@ -96,6 +96,8 @@ _STEP_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
         {
             StepStatus.READY,
             StepStatus.BLOCKED,
+            StepStatus.WAITING_FOR_APPROVAL,
+            StepStatus.FAILED,
             StepStatus.SKIPPED,
             StepStatus.CANCELLED,
         }
@@ -104,6 +106,8 @@ _STEP_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
         {
             StepStatus.RUNNING,
             StepStatus.BLOCKED,
+            StepStatus.WAITING_FOR_APPROVAL,
+            StepStatus.FAILED,
             StepStatus.SKIPPED,
             StepStatus.CANCELLED,
         }
@@ -122,7 +126,13 @@ _STEP_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
         {StepStatus.READY, StepStatus.FAILED, StepStatus.CANCELLED}
     ),
     StepStatus.WAITING_FOR_APPROVAL: frozenset(
-        {StepStatus.RUNNING, StepStatus.FAILED, StepStatus.CANCELLED, StepStatus.SKIPPED}
+        {
+            StepStatus.READY,
+            StepStatus.RUNNING,
+            StepStatus.FAILED,
+            StepStatus.CANCELLED,
+            StepStatus.SKIPPED,
+        }
     ),
     # Terminal
     StepStatus.COMPLETED: frozenset(),

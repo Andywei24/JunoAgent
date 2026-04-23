@@ -14,8 +14,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
-from brain_core.enums import ActorType, EventType, StepStatus, TaskStatus
-from brain_core.ids import new_event_id, new_step_id, new_task_id
+from brain_core.enums import ActorType, ApprovalStatus, EventType, StepStatus, TaskStatus
+from brain_core.ids import new_approval_id, new_event_id, new_step_id, new_task_id
 from brain_core.state_machine import StepStateMachine, TaskStateMachine
 
 from brain_db import models
@@ -221,6 +221,95 @@ class ToolRepository:
         tool.enabled = enabled
         self.db.flush()
         return tool
+
+
+# ---------------------------------------------------------------------------
+# Approvals
+# ---------------------------------------------------------------------------
+
+
+class ApprovalRepository:
+    """CRUD for the approvals table.
+
+    Approvals are created by the engine when a step needs a human decision,
+    and resolved by the API layer. The row carries enough context (action,
+    risk, data involved) that approvers can decide without re-reading the
+    step.
+    """
+
+    def __init__(self, db: OrmSession) -> None:
+        self.db = db
+
+    def get(self, approval_id: str) -> models.Approval | None:
+        return self.db.get(models.Approval, approval_id)
+
+    def create(
+        self,
+        *,
+        task_id: str,
+        step_id: str | None,
+        requested_action: str,
+        risk_level: str,
+        reason: str | None = None,
+        data_involved: dict[str, Any] | None = None,
+        requested_by: str | None = None,
+        status: ApprovalStatus = ApprovalStatus.PENDING,
+        expires_at: datetime | None = None,
+    ) -> models.Approval:
+        approval = models.Approval(
+            id=new_approval_id(),
+            task_id=task_id,
+            step_id=step_id,
+            status=status.value,
+            requested_action=requested_action,
+            risk_level=risk_level,
+            reason=reason,
+            data_involved=data_involved or {},
+            requested_by=requested_by,
+            expires_at=expires_at,
+        )
+        self.db.add(approval)
+        self.db.flush()
+        return approval
+
+    def resolve(
+        self,
+        approval: models.Approval,
+        target: ApprovalStatus,
+        *,
+        approved_by: str | None = None,
+        reason: str | None = None,
+    ) -> models.Approval:
+        if approval.status != ApprovalStatus.PENDING.value:
+            raise ValueError(
+                f"approval {approval.id} already resolved ({approval.status})"
+            )
+        approval.status = target.value
+        approval.approved_by = approved_by
+        if reason is not None:
+            approval.reason = reason
+        approval.resolved_at = _utcnow()
+        self.db.flush()
+        return approval
+
+    def list_pending_for_user(self, user_id: str) -> list[models.Approval]:
+        """Approvals across all of a user's tasks that still need a decision."""
+        stmt = (
+            select(models.Approval)
+            .join(models.Task, models.Task.id == models.Approval.task_id)
+            .where(models.Task.user_id == user_id)
+            .where(models.Approval.status == ApprovalStatus.PENDING.value)
+            .order_by(models.Approval.created_at.asc())
+        )
+        return list(self.db.scalars(stmt))
+
+    def list_for_task(self, task_id: str) -> list[models.Approval]:
+        stmt = (
+            select(models.Approval)
+            .where(models.Approval.task_id == task_id)
+            .order_by(models.Approval.created_at.asc())
+        )
+        return list(self.db.scalars(stmt))
 
 
 # ---------------------------------------------------------------------------

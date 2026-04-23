@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from brain_api.config import Settings, get_settings
 from brain_api.logging_setup import configure_logging, get_logger
 from brain_api.middleware import RequestContextMiddleware
+from brain_api.routes.approvals import router as approvals_router
 from brain_api.routes.health import router as health_router
 from brain_api.routes.tasks import router as tasks_router
 from brain_api.routes.tools import router as tools_router
@@ -44,6 +45,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(tasks_router)
     app.include_router(tools_router)
+    app.include_router(approvals_router)
 
     console_dir = Path(__file__).resolve().parents[3] / "apps" / "console"
     if console_dir.exists():

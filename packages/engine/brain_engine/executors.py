@@ -7,6 +7,7 @@ executors + their specs is the source of truth for the ``tools`` table.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from brain_core.enums import RiskLevel, ToolBackendType, ToolCapabilityType
@@ -84,6 +85,9 @@ class LLMReasoningExecutor(_LLMBackedExecutor):
 
     def _render_variables(self, ctx: ToolExecutionContext) -> dict[str, Any]:
         instruction = _extract_instruction(ctx.input_payload) or ctx.step_name
+        context_prefix = _render_context_prefix(ctx.context_bundle)
+        if context_prefix:
+            instruction = f"{context_prefix}\n\n{instruction}"
         return {
             "goal": ctx.goal,
             "step_name": ctx.step_name,
@@ -202,3 +206,34 @@ def _extract_instruction(payload: dict[str, Any] | None) -> str | None:
         if isinstance(v, str) and v.strip():
             return v
     return None
+
+
+def _render_context_prefix(bundle: dict[str, Any] | None) -> str:
+    """Render the context bundle as a compact prompt preamble.
+
+    Only sections that have content are included, so steps without prior
+    outputs or retrieved memories don't get a wall of empty headers.
+    """
+    if not bundle:
+        return ""
+    chunks: list[str] = []
+    memories = bundle.get("relevant_memories") or []
+    if memories:
+        lines = ["Relevant past memories:"]
+        for mem in memories:
+            summary = mem.get("summary") or mem.get("content") or ""
+            lines.append(f"- [{mem.get('memory_type', 'mem')}] {summary[:240]}")
+        chunks.append("\n".join(lines))
+    prior = bundle.get("prior_step_outputs") or []
+    if prior:
+        lines = ["Prior step outputs:"]
+        for item in prior:
+            name = item.get("name") or item.get("step_id") or "step"
+            output = item.get("output")
+            try:
+                rendered = json.dumps(output, default=str)[:300]
+            except (TypeError, ValueError):
+                rendered = str(output)[:300]
+            lines.append(f"- {name}: {rendered}")
+        chunks.append("\n".join(lines))
+    return "\n\n".join(chunks)

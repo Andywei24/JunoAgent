@@ -22,6 +22,7 @@ class ToolExecutionContext:
     goal: str
     step_name: str
     input_payload: dict[str, Any]
+    context_bundle: dict[str, Any] | None = None
 
 
 class ToolExecutor(Protocol):

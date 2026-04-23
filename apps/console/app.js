@@ -6,6 +6,7 @@ const state = {
   events: [],
   stream: null,
   approvals: [],
+  memories: [],
 };
 
 const EVENT_NAMES = [
@@ -54,6 +55,8 @@ const els = {
   detailBudgetDetail: document.querySelector("#detail-budget-detail"),
   refreshApprovals: document.querySelector("#refresh-approvals"),
   approvalList: document.querySelector("#approval-list"),
+  refreshMemories: document.querySelector("#refresh-memories"),
+  memoryList: document.querySelector("#memory-list"),
   planUpdated: document.querySelector("#plan-updated"),
   stepList: document.querySelector("#step-list"),
   finalOutput: document.querySelector("#final-output"),
@@ -66,10 +69,12 @@ const els = {
 els.form.addEventListener("submit", createTask);
 els.refreshTasks.addEventListener("click", loadTasks);
 els.refreshApprovals.addEventListener("click", loadApprovals);
+els.refreshMemories.addEventListener("click", loadMemories);
 els.cancelTask.addEventListener("click", cancelSelectedTask);
 
 loadTasks();
 loadApprovals();
+loadMemories();
 
 async function createTask(event) {
   event.preventDefault();
@@ -124,6 +129,25 @@ async function approveApproval(approvalId) {
     showToast("Approval granted.");
     await loadApprovals();
     if (state.selectedTaskId) await refreshSelectedTask();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function loadMemories() {
+  try {
+    state.memories = await api("/v1/memories?limit=50");
+    renderMemories();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function deleteMemory(memoryId) {
+  try {
+    await api(`/v1/memories/${encodeURIComponent(memoryId)}`, { method: "DELETE" });
+    showToast("Memory removed.");
+    await loadMemories();
   } catch (error) {
     showToast(error.message);
   }
@@ -218,6 +242,9 @@ function handleStreamEvent(event) {
   refreshSelectedTask();
   if (event.type.startsWith("approval.")) {
     loadApprovals();
+  }
+  if (event.type === "memory.written") {
+    loadMemories();
   }
 }
 
@@ -362,6 +389,43 @@ function renderApprovals() {
       item.querySelector('[data-action="view"]').addEventListener("click", () =>
         selectTask(approval.task_id),
       );
+      return item;
+    }),
+  );
+}
+
+function renderMemories() {
+  if (!state.memories.length) {
+    els.memoryList.innerHTML = `<p class="muted">No memories yet.</p>`;
+    return;
+  }
+  els.memoryList.replaceChildren(
+    ...state.memories.map((memory) => {
+      const item = document.createElement("article");
+      item.className = "memory-item";
+      const summary = memory.summary || memory.content.slice(0, 80);
+      const importance = Number(memory.importance || 0).toFixed(2);
+      item.innerHTML = `
+        <strong>${escapeHtml(summary)}</strong>
+        <div class="memory-meta">
+          <span>${escapeHtml(memory.memory_type)}</span>
+          <span>importance ${escapeHtml(importance)}</span>
+          <span>${formatDate(memory.created_at)}</span>
+          ${memory.task_id ? `<span>task</span>` : ""}
+        </div>
+        <p class="memory-body">${escapeHtml(memory.content.slice(0, 220))}${memory.content.length > 220 ? "…" : ""}</p>
+        <div class="memory-actions">
+          ${memory.task_id ? `<button type="button" data-action="view" data-id="${escapeHtml(memory.task_id)}">View task</button>` : ""}
+          <button type="button" data-action="delete" data-id="${escapeHtml(memory.id)}">Forget</button>
+        </div>
+      `;
+      item.querySelector('[data-action="delete"]').addEventListener("click", () =>
+        deleteMemory(memory.id),
+      );
+      const viewBtn = item.querySelector('[data-action="view"]');
+      if (viewBtn) {
+        viewBtn.addEventListener("click", () => selectTask(memory.task_id));
+      }
       return item;
     }),
   );

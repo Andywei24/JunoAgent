@@ -17,11 +17,13 @@ from brain_db import session as db_session
 from brain_db.repositories import ToolRepository
 from brain_engine.approvals import ApprovalManager
 from brain_engine.budget import BudgetController
+from brain_engine.context_builder import ContextBuilder
 from brain_engine.executors import (
     CompareItemsExecutor,
     LLMReasoningExecutor,
     SummarizeTextExecutor,
 )
+from brain_engine.memory import MemoryService
 from brain_engine.orchestrator import Orchestrator, OrchestratorDeps
 from brain_engine.policy import PolicyEngine
 from brain_engine.runner import TaskRunner
@@ -43,6 +45,8 @@ class Services:
     policy: PolicyEngine
     budget: BudgetController
     approvals: ApprovalManager
+    memory: MemoryService
+    context_builder: ContextBuilder
     orchestrator: Orchestrator
     runner: TaskRunner
 
@@ -67,6 +71,8 @@ def build_services(settings: Settings) -> Services:
     policy = PolicyEngine()
     budget = BudgetController()
     approvals = ApprovalManager()
+    memory = MemoryService()
+    context_builder = ContextBuilder(memory=memory)
 
     orchestrator = Orchestrator(
         OrchestratorDeps(
@@ -77,6 +83,8 @@ def build_services(settings: Settings) -> Services:
             policy=policy,
             budget=budget,
             approvals=approvals,
+            memory=memory,
+            context_builder=context_builder,
         )
     )
     runner = TaskRunner(orchestrator)
@@ -90,6 +98,8 @@ def build_services(settings: Settings) -> Services:
         policy=policy,
         budget=budget,
         approvals=approvals,
+        memory=memory,
+        context_builder=context_builder,
         orchestrator=orchestrator,
         runner=runner,
     )

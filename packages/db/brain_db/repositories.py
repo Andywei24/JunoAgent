@@ -14,8 +14,21 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
-from brain_core.enums import ActorType, ApprovalStatus, EventType, StepStatus, TaskStatus
-from brain_core.ids import new_approval_id, new_event_id, new_step_id, new_task_id
+from brain_core.enums import (
+    ActorType,
+    ApprovalStatus,
+    EventType,
+    MemoryType,
+    StepStatus,
+    TaskStatus,
+)
+from brain_core.ids import (
+    new_approval_id,
+    new_event_id,
+    new_memory_id,
+    new_step_id,
+    new_task_id,
+)
 from brain_core.state_machine import StepStateMachine, TaskStateMachine
 
 from brain_db import models
@@ -363,6 +376,102 @@ class EventRepository:
         if after_sequence is not None:
             stmt = stmt.where(models.Event.sequence > after_sequence)
         stmt = stmt.order_by(models.Event.sequence.asc()).limit(limit)
+        return list(self.db.scalars(stmt))
+
+
+# ---------------------------------------------------------------------------
+# Memories
+# ---------------------------------------------------------------------------
+
+
+class MemoryRepository:
+    """CRUD over :class:`models.MemoryItem`.
+
+    Embeddings, when present, are stashed in the JSON ``metadata`` column
+    under the key ``"embedding"`` — a list[float]. This keeps SQLite-based
+    tests working while leaving room for a pgvector migration later.
+    """
+
+    EMBEDDING_KEY = "embedding"
+
+    def __init__(self, db: OrmSession) -> None:
+        self.db = db
+
+    def create(
+        self,
+        *,
+        user_id: str,
+        memory_type: MemoryType,
+        content: str,
+        task_id: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        embedding: list[float] | None = None,
+        importance: float = 0.0,
+        expires_at: datetime | None = None,
+    ) -> models.MemoryItem:
+        meta: dict[str, Any] = dict(metadata or {})
+        if embedding is not None:
+            meta[self.EMBEDDING_KEY] = embedding
+        item = models.MemoryItem(
+            id=new_memory_id(),
+            user_id=user_id,
+            task_id=task_id,
+            memory_type=memory_type.value,
+            content=content,
+            summary=summary,
+            meta=meta,
+            importance=importance,
+            expires_at=expires_at,
+        )
+        self.db.add(item)
+        self.db.flush()
+        return item
+
+    def get(self, memory_id: str) -> models.MemoryItem | None:
+        return self.db.get(models.MemoryItem, memory_id)
+
+    def list_for_user(
+        self,
+        user_id: str,
+        *,
+        memory_type: MemoryType | None = None,
+        task_id: str | None = None,
+        limit: int = 50,
+    ) -> list[models.MemoryItem]:
+        stmt = select(models.MemoryItem).where(models.MemoryItem.user_id == user_id)
+        if memory_type is not None:
+            stmt = stmt.where(models.MemoryItem.memory_type == memory_type.value)
+        if task_id is not None:
+            stmt = stmt.where(models.MemoryItem.task_id == task_id)
+        stmt = stmt.order_by(models.MemoryItem.created_at.desc()).limit(limit)
+        return list(self.db.scalars(stmt))
+
+    def delete(self, memory_id: str) -> bool:
+        item = self.get(memory_id)
+        if item is None:
+            return False
+        self.db.delete(item)
+        self.db.flush()
+        return True
+
+    def candidates_for_search(
+        self,
+        user_id: str,
+        *,
+        memory_type: MemoryType | None = None,
+        limit: int = 200,
+    ) -> list[models.MemoryItem]:
+        """Pull a pool of memories to rank in Python.
+
+        We page over the most recent rows first — in a real deployment this
+        would be replaced with a pgvector ANN query, but the ranker in
+        :class:`brain_engine.memory.MemoryService` is the source of truth.
+        """
+        stmt = select(models.MemoryItem).where(models.MemoryItem.user_id == user_id)
+        if memory_type is not None:
+            stmt = stmt.where(models.MemoryItem.memory_type == memory_type.value)
+        stmt = stmt.order_by(models.MemoryItem.created_at.desc()).limit(limit)
         return list(self.db.scalars(stmt))
 
 

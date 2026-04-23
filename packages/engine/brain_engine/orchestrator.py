@@ -51,7 +51,9 @@ from brain_prompts.registry import PromptRegistry
 
 from brain_engine.approvals import ApprovalManager
 from brain_engine.budget import BudgetController
+from brain_engine.context_builder import ContextBuilder
 from brain_engine.goal_parser import GoalParser
+from brain_engine.memory import MemoryService
 from brain_engine.planner import Planner
 from brain_engine.policy import PolicyAction, PolicyEngine
 from brain_engine.tool_router import ToolExecutionContext, ToolRouter
@@ -78,6 +80,8 @@ class OrchestratorDeps:
     policy: PolicyEngine
     budget: BudgetController
     approvals: ApprovalManager
+    memory: MemoryService
+    context_builder: ContextBuilder
 
 
 class Orchestrator:
@@ -424,12 +428,25 @@ class Orchestrator:
                 payload={"name": step.name},
                 actor_type=ActorType.SYSTEM,
             )
+            # Build the context bundle (goal + prior outputs + relevant
+            # memories + recent events) so the executor can splice it into
+            # the prompt. The builder emits a ``memory.retrieved`` event via
+            # MemoryService.search, so this has to run inside the session.
+            try:
+                bundle = self._deps.context_builder.build(
+                    db, task_id=task_id, step_id=step_id
+                )
+                context_payload = bundle.to_dict()
+            except Exception:  # noqa: BLE001 — context is best-effort
+                log.exception("context_builder failed for step %s", step_id)
+                context_payload = None
             ctx = ToolExecutionContext(
                 task_id=task_id,
                 step_id=step_id,
                 goal=task.goal,
                 step_name=step.name,
                 input_payload=input_payload,
+                context_bundle=context_payload,
             )
             db.commit()
 
@@ -541,6 +558,12 @@ class Orchestrator:
                 payload={"final_output": task.final_output},
                 actor_type=ActorType.SYSTEM,
             )
+            # Write the long-term task summary so future tasks can recall it.
+            # Summary failure shouldn't block completion — log and move on.
+            try:
+                self._deps.memory.summarize_task(db, task)
+            except Exception:  # noqa: BLE001
+                log.exception("task summary write failed for %s", task_id)
             db.commit()
 
     def _mark_failed(self, task_id: str, exc: BaseException) -> None:

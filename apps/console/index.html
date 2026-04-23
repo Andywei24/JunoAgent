@@ -46,6 +46,14 @@
           </div>
           <div id="task-list" class="task-list" aria-live="polite"></div>
         </section>
+
+        <section class="panel approvals-panel" aria-labelledby="approvals-title">
+          <div class="panel-heading">
+            <h2 id="approvals-title">Pending Approvals</h2>
+            <button id="refresh-approvals" class="ghost-button" type="button">Refresh</button>
+          </div>
+          <div id="approval-list" class="approval-list" aria-live="polite"></div>
+        </section>
       </aside>
 
       <main class="workspace">
@@ -83,6 +91,11 @@
             <div class="metric">
               <span>Events</span>
               <strong id="detail-events">0</strong>
+            </div>
+            <div class="metric">
+              <span>Budget</span>
+              <strong id="detail-budget">-</strong>
+              <small id="detail-budget-detail" class="metric-detail"></small>
             </div>
           </section>
 

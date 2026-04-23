@@ -5,6 +5,7 @@ const state = {
   steps: [],
   events: [],
   stream: null,
+  approvals: [],
 };
 
 const EVENT_NAMES = [
@@ -49,6 +50,10 @@ const els = {
   detailRisk: document.querySelector("#detail-risk"),
   detailSteps: document.querySelector("#detail-steps"),
   detailEvents: document.querySelector("#detail-events"),
+  detailBudget: document.querySelector("#detail-budget"),
+  detailBudgetDetail: document.querySelector("#detail-budget-detail"),
+  refreshApprovals: document.querySelector("#refresh-approvals"),
+  approvalList: document.querySelector("#approval-list"),
   planUpdated: document.querySelector("#plan-updated"),
   stepList: document.querySelector("#step-list"),
   finalOutput: document.querySelector("#final-output"),
@@ -60,9 +65,11 @@ const els = {
 
 els.form.addEventListener("submit", createTask);
 els.refreshTasks.addEventListener("click", loadTasks);
+els.refreshApprovals.addEventListener("click", loadApprovals);
 els.cancelTask.addEventListener("click", cancelSelectedTask);
 
 loadTasks();
+loadApprovals();
 
 async function createTask(event) {
   event.preventDefault();
@@ -95,6 +102,43 @@ async function loadTasks() {
   try {
     state.tasks = await api("/v1/tasks?limit=100");
     renderTasks();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function loadApprovals() {
+  try {
+    state.approvals = await api("/v1/approvals");
+    renderApprovals();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function approveApproval(approvalId) {
+  try {
+    await api(`/v1/approvals/${encodeURIComponent(approvalId)}/approve`, {
+      method: "POST",
+    });
+    showToast("Approval granted.");
+    await loadApprovals();
+    if (state.selectedTaskId) await refreshSelectedTask();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function rejectApproval(approvalId) {
+  try {
+    await api(`/v1/approvals/${encodeURIComponent(approvalId)}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    showToast("Approval rejected.");
+    await loadApprovals();
+    if (state.selectedTaskId) await refreshSelectedTask();
   } catch (error) {
     showToast(error.message);
   }
@@ -172,6 +216,9 @@ function handleStreamEvent(event) {
   }
   renderEvents();
   refreshSelectedTask();
+  if (event.type.startsWith("approval.")) {
+    loadApprovals();
+  }
 }
 
 function renderTasks() {
@@ -214,6 +261,7 @@ function renderDetail() {
   els.detailSteps.textContent = String(state.steps.length);
   els.detailEvents.textContent = String(state.events.length);
   els.planUpdated.textContent = state.task.updated_at ? `Updated ${formatDate(state.task.updated_at)}` : "";
+  renderBudget(state.task.budget_limit, state.task.budget_used);
   els.parsedGoal.textContent = formatJson(state.task.parsed_goal);
   els.finalOutput.textContent = state.task.final_output
     ? formatJson(state.task.final_output)
@@ -246,6 +294,74 @@ function renderSteps() {
           ${step.error ? `<pre class="event-payload">${escapeHtml(step.error)}</pre>` : ""}
         </div>
       `;
+      return item;
+    }),
+  );
+}
+
+function renderBudget(limit, used) {
+  limit = limit || {};
+  used = used || {};
+  const keys = new Set([...Object.keys(limit), ...Object.keys(used)]);
+  if (!keys.size) {
+    els.detailBudget.textContent = "unbounded";
+    els.detailBudgetDetail.textContent = "";
+    return;
+  }
+  const rows = [];
+  let headline = "ok";
+  for (const key of keys) {
+    const u = used[key];
+    const l = limit[key];
+    if (u !== undefined && l !== undefined) {
+      rows.push(`${shortBudgetKey(key)} ${u}/${l}`);
+      if (Number(u) >= Number(l)) headline = "at limit";
+    } else if (u !== undefined) {
+      rows.push(`${shortBudgetKey(key)} ${u}`);
+    } else if (l !== undefined) {
+      rows.push(`${shortBudgetKey(key)} 0/${l}`);
+    }
+  }
+  els.detailBudget.textContent = headline;
+  els.detailBudgetDetail.textContent = rows.join(" · ");
+}
+
+function shortBudgetKey(key) {
+  return key.replace(/^max_/, "").replaceAll("_", " ");
+}
+
+function renderApprovals() {
+  if (!state.approvals.length) {
+    els.approvalList.innerHTML = `<p class="muted">No pending approvals.</p>`;
+    return;
+  }
+  els.approvalList.replaceChildren(
+    ...state.approvals.map((approval) => {
+      const item = document.createElement("article");
+      item.className = "approval-item";
+      const reason = approval.reason || approval.requested_action || "awaiting decision";
+      item.innerHTML = `
+        <strong>${escapeHtml(approval.requested_action || "approval")}</strong>
+        <div class="approval-meta">
+          <span>risk: ${escapeHtml(approval.risk_level || "medium")}</span>
+          <span>${formatDate(approval.created_at)}</span>
+        </div>
+        <p class="approval-reason">${escapeHtml(reason)}</p>
+        <div class="approval-actions">
+          <button type="button" data-action="approve" data-id="${escapeHtml(approval.id)}">Approve</button>
+          <button type="button" data-action="reject" data-id="${escapeHtml(approval.id)}">Reject</button>
+          <button type="button" data-action="view" data-id="${escapeHtml(approval.task_id)}">View task</button>
+        </div>
+      `;
+      item.querySelector('[data-action="approve"]').addEventListener("click", () =>
+        approveApproval(approval.id),
+      );
+      item.querySelector('[data-action="reject"]').addEventListener("click", () =>
+        rejectApproval(approval.id),
+      );
+      item.querySelector('[data-action="view"]').addEventListener("click", () =>
+        selectTask(approval.task_id),
+      );
       return item;
     }),
   );

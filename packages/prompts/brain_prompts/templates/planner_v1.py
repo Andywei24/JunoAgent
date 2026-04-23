@@ -13,11 +13,26 @@ dispatch to the tool router.
 
 Rules:
   - Prefer 3 to 7 steps. More means harder to verify; fewer often hides work.
-  - Each step must name a `required_capability` tag so the tool router can
-    choose an executor. Use short snake_case tags (`llm_reasoning`,
-    `web_search`, `file_read`, `code_exec`).
-  - Set `approval_required = true` for any step that touches external systems
-    irreversibly (sending email, writing to shared storage, making payments).
+  - Each step must name a `required_capability` — pick a value that appears
+    in the capabilities list provided in the user message. Using a capability
+    not in that list will fail routing and block the task.
+  - Assign `risk_level` based on the worst outcome of the step:
+      * `low`      — pure reasoning, read-only lookups, local scratch work.
+      * `medium`   — reversible writes to user-private scratch space, or any
+                     external call whose output is consumed only by later
+                     steps (web search, data retrieval).
+      * `high`     — reversible writes to shared systems, partial send-style
+                     actions, anything a human would want to double-check.
+      * `critical` — irreversible, externally-visible actions: sending
+                     email, posting, making payments, deleting data, any
+                     action that cannot be rolled back by the agent alone.
+  - Set `approval_required = true` whenever the step touches external
+    systems irreversibly, or its `risk_level` is `high` or `critical`. When
+    in doubt, err toward requiring approval — a paused task is cheaper than
+    a bad action.
+  - Never propose a capability whose tool risk exceeds the step work: if
+    the capability list marks a tool as `high`, the step that uses it
+    inherits at least that risk.
   - Keep `input_payload` as a small JSON object describing the step's
     instructions. The executor decides how to interpret it.
 
@@ -25,8 +40,10 @@ Output ONLY a JSON object matching the schema. No prose. No code fences.
 """
 
 USER_TEMPLATE = (
-    "Produce an execution plan for the goal below. Output only JSON matching "
-    "the schema."
+    "Available capabilities (id · capability · tool_risk):\n"
+    "{capabilities}\n\n"
+    "Produce an execution plan for the goal below. Output only JSON "
+    "matching the schema."
 )
 
 RESPONSE_SCHEMA = {
@@ -54,7 +71,7 @@ RESPONSE_SCHEMA = {
                     "required_capability": {"type": "string"},
                     "risk_level": {
                         "type": "string",
-                        "enum": ["low", "medium", "high"],
+                        "enum": ["low", "medium", "high", "critical"],
                     },
                     "approval_required": {"type": "boolean"},
                     "input_payload": {"type": "object"},
@@ -71,7 +88,7 @@ TEMPLATE = PromptTemplate(
     version=1,
     system=SYSTEM,
     user_template=USER_TEMPLATE,
-    required_vars=("goal", "parsed_goal"),
+    required_vars=("goal", "parsed_goal", "capabilities"),
     response_schema=RESPONSE_SCHEMA,
     model_intent="reasoning",
     description="Decomposes a parsed goal into an ordered plan.",

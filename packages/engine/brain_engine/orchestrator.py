@@ -185,7 +185,13 @@ class Orchestrator:
             goal = task.goal
             db.commit()
 
-        plan = self._planner.plan(goal=goal, parsed_goal=parsed_goal, task_id=task_id)
+        capabilities = self._render_capabilities()
+        plan = self._planner.plan(
+            goal=goal,
+            parsed_goal=parsed_goal,
+            capabilities=capabilities,
+            task_id=task_id,
+        )
         step_specs = plan.get("steps", [])
         if not step_specs:
             raise RuntimeError("planner produced an empty plan")
@@ -509,6 +515,17 @@ class Orchestrator:
             )
             db.commit()
             raise RuntimeError(f"step {step_id} failed: {error}")
+
+    def _render_capabilities(self) -> str:
+        """Render the registered tool catalog as prompt-ready lines."""
+        specs = self._deps.tool_router.list_specs()
+        if not specs:
+            return "(no tools registered)"
+        lines = []
+        for spec in sorted(specs, key=lambda s: s.capability):
+            risk = getattr(spec.risk_level, "value", spec.risk_level)
+            lines.append(f"- {spec.id} · {spec.capability} · risk={risk}")
+        return "\n".join(lines)
 
     def _finalize(self, task_id: str) -> None:
         with self._session() as db:

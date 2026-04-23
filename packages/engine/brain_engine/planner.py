@@ -15,10 +15,20 @@ class Planner:
         self._prompts = prompts
 
     def plan(
-        self, *, goal: str, parsed_goal: dict[str, Any], task_id: str
+        self,
+        *,
+        goal: str,
+        parsed_goal: dict[str, Any],
+        capabilities: str,
+        task_id: str,
     ) -> dict[str, Any]:
         rendered = self._prompts.render(
-            "planner/v1", {"goal": goal, "parsed_goal": parsed_goal}
+            "planner/v1",
+            {
+                "goal": goal,
+                "parsed_goal": parsed_goal,
+                "capabilities": capabilities,
+            },
         )
         request = LLMRequest(
             messages=rendered.messages,

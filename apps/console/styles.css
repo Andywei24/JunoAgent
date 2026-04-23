@@ -339,6 +339,64 @@ label {
   display: block;
 }
 
+.metric-detail {
+  display: block;
+  margin-top: 8px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  opacity: 0.7;
+}
+
+/* Approvals */
+.approval-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.approval-item {
+  border-left: 2px solid var(--ghost-border);
+  padding: 0 0 0 16px;
+}
+
+.approval-item strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.96px;
+  margin-bottom: 8px;
+}
+
+.approval-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  opacity: 0.7;
+  margin-bottom: 8px;
+}
+
+.approval-reason {
+  font-size: 12px;
+  opacity: 0.85;
+  margin: 0 0 12px 0;
+}
+
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.approval-actions button {
+  padding: 10px 16px;
+  font-size: 11px;
+}
+
 /* Detail Layout */
 .detail-layout {
   display: grid;
